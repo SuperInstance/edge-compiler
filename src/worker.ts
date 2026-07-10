@@ -143,7 +143,7 @@ async function processCompilationJob(jobId: string, data: CompileRequest, env: E
       throw new Error("Model not found");
     }
 
-    const compiledModel = await compileModel(model, data);
+    const compiledModel = await compileModel(model, data, env);
     
     const outputKey = `compiled/${jobId}/${data.modelId}.${data.target}`;
     await env.MODEL_STORE.put(outputKey, compiledModel);
@@ -158,16 +158,17 @@ async function processCompilationJob(jobId: string, data: CompileRequest, env: E
     }), { expirationTtl: 86400 });
     
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     await env.COMPILER_CACHE.put(cacheKey, JSON.stringify({
       ...data,
       status: 'failed',
-      error: error.message,
+      error: errorMessage,
       failedAt: Date.now()
     }), { expirationTtl: 3600 });
   }
 }
 
-async function compileModel(model: R2Object, options: CompileRequest): Promise<ArrayBuffer> {
+async function compileModel(model: R2ObjectBody, options: CompileRequest, env: Env): Promise<ArrayBuffer> {
   const modelData = await model.arrayBuffer();
   
   const compilationOptions = {
@@ -185,7 +186,8 @@ async function compileModel(model: R2Object, options: CompileRequest): Promise<A
     options: compilationOptions
   });
 
-  return result.compiledModel;
+  const compiled = result as { compiledModel: ArrayBuffer };
+  return compiled.compiledModel;
 }
 
 async function handleQuantize(request: Request, env: Env): Promise<Response> {
@@ -218,7 +220,7 @@ async function handleQuantize(request: Request, env: Env): Promise<Response> {
     const quantized = await env.AI.run("@cf/quantization", {
       model: new Uint8Array(modelData),
       options: quantizationOptions
-    });
+    }) as { model: Uint8Array };
 
     const quantizedKey = `quantized/${data.modelId}_${data.precision}`;
     await env.MODEL_STORE.put(quantizedKey, quantized.model);
