@@ -164,10 +164,14 @@ symmetric linear quantization pass implemented directly in the Worker
   `[127,-127,64,-63,32,-32,0,16]`, scale `1/127`, payload 8 B vs 32 B (75%
   reduction), stored blob 16 B vs 32 B (50% reduction), plus dequantization
   round-trip and blob encode/decode validation.
-- **Integration tests** (`src/worker.test.ts`, 9 tests) running the real Worker
+- **Integration tests** (`src/worker.test.ts`, 14 tests) running the real Worker
   in the `workerd` runtime via `@cloudflare/vitest-pool-workers` with in-memory
   KV/R2 stubs, asserting the live HTTP response carries those exact numbers and
-  the downloaded blob decodes to the expected INT8 array.
+  the downloaded blob decodes to the expected INT8 array. They also cover the
+  `/api/compile` validation branches (missing fields, unsupported hardware,
+  unsupported precision) and verify the compile job's background task is
+  scheduled via `ctx.waitUntil` so its KV status actually transitions out of
+  `queued`.
 
 `int4` quantization is **not** implemented and is honestly rejected with `501`
 rather than faked.
@@ -193,7 +197,7 @@ npx wrangler deploy
 
 ```bash
 npm run typecheck   # tsc, strict
-npm test            # vitest: 19 tests (10 unit + 9 integration)
+npm test            # vitest: 24 tests (10 unit + 14 integration)
 ```
 
 Tests run the real Worker inside the `workerd` runtime via

@@ -146,3 +146,121 @@ describe("POST /api/quantize (validation & honesty)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("POST /api/compile (validation)", () => {
+  async function postCompile(body: unknown): Promise<Response> {
+    return SELF.fetch("http://localhost/api/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("returns 400 when required fields are missing", async () => {
+    const res = await postCompile({ modelId: "m" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/missing required fields/i);
+  });
+
+  it("returns 400 for an unsupported hardware target", async () => {
+    const res = await postCompile({
+      modelId: "m",
+      target: "onnx",
+      hardware: "nvidia-a100",
+      precision: "fp32",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/unsupported hardware/i);
+  });
+
+  it("returns 400 when the precision is not supported for the hardware", async () => {
+    // raspberry-pi-4 only supports int8.
+    const res = await postCompile({
+      modelId: "m",
+      target: "tflite",
+      hardware: "raspberry-pi-4",
+      precision: "fp32",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/not supported/i);
+  });
+
+  it("returns 202 with a queued job shape", async () => {
+    const res = await postCompile({
+      modelId: "m",
+      target: "onnx",
+      hardware: "nvidia-t4",
+      precision: "fp32",
+    });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as {
+      jobId?: string;
+      status?: string;
+      estimatedTime?: number;
+    };
+    expect(body.jobId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(body.status).toBe("queued");
+    expect(body.estimatedTime).toBe(120);
+  });
+});
+
+describe("POST /api/compile (background job scheduling via ctx.waitUntil)", () => {
+  async function postCompile(body: unknown): Promise<Response> {
+    return SELF.fetch("http://localhost/api/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  // Reads the raw KV record for a compile job so we can assert on the status
+  // transitions written by the background task.
+  async function readCompileJob(
+    jobId: string,
+  ): Promise<{ status?: string; error?: string } | null> {
+    const raw = await testEnv.COMPILER_CACHE.get(`compile:${jobId}`);
+    if (raw === null) return null;
+    return JSON.parse(raw) as { status?: string; error?: string };
+  }
+
+  // ctx.waitUntil'd tasks settle asynchronously after the fetch response is
+  // returned; poll KV until the background job reaches a terminal status.
+  async function waitForTerminalStatus(
+    jobId: string,
+    timeoutMs = 2000,
+  ): Promise<{ status?: string; error?: string }> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const job = await readCompileJob(jobId);
+      if (job && (job.status === "completed" || job.status === "failed")) {
+        return job;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for compile job ${jobId} to settle`);
+  }
+
+  it("actually runs the background job: KV transitions from queued to a terminal status", async () => {
+    // modelId "missing-model" is intentionally not in R2, so the background
+    // job deterministically fails at the lookup step ("Model not found")
+    // without ever touching env.AI (which is unbound in the test runtime).
+    const res = await postCompile({
+      modelId: "missing-model",
+      target: "onnx",
+      hardware: "nvidia-t4",
+      precision: "fp32",
+    });
+    expect(res.status).toBe(202);
+    const { jobId } = (await res.json()) as { jobId: string };
+
+    // With the old setTimeout()-based scheduling, the background task was not
+    // registered with the execution context and the job would stay "queued"
+    // forever. With ctx.waitUntil(), it settles to "failed" here.
+    const job = await waitForTerminalStatus(jobId);
+    expect(job.status).toBe("failed");
+    expect(job.error).toMatch(/model not found/i);
+  });
+});

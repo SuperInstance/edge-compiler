@@ -102,7 +102,11 @@ function jsonError(status: number, message: string): Response {
   });
 }
 
-async function handleCompile(request: Request, env: Env): Promise<Response> {
+async function handleCompile(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   try {
     const data: CompileRequest = await request.json();
     
@@ -145,7 +149,12 @@ async function handleCompile(request: Request, env: Env): Promise<Response> {
       createdAt: Date.now()
     }), { expirationTtl: 3600 });
 
-    setTimeout(() => processCompilationJob(jobId, data, env), 100);
+    // Schedule the background job through the request's execution context so
+    // the Workers runtime keeps the isolate alive long enough for the KV
+    // status transitions (queued -> processing -> completed|failed) to actually
+    // run. A bare setTimeout() is NOT guaranteed to fire after the response is
+    // returned; ctx.waitUntil() is the correct primitive.
+    ctx.waitUntil(processCompilationJob(jobId, data, env));
 
     return new Response(JSON.stringify(response), {
       status: 202,
@@ -360,7 +369,7 @@ export default {
     }
 
     if (path === "/api/compile" && request.method === "POST") {
-      return handleCompile(request, env);
+      return handleCompile(request, env, ctx);
     }
 
     if (path === "/api/quantize" && request.method === "POST") {
