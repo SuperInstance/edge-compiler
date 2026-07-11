@@ -4,11 +4,14 @@
   "description": "Compile and optimize models for specific hardware targets",
   "private": true,
   "scripts": {
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260710.1",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }
