@@ -1,6 +1,12 @@
 # edge-compiler
 
-Compile and optimize machine learning models for specific hardware targets using Cloudflare Workers Edge Compiler.
+A Cloudflare Worker for compiling and quantizing machine-learning models for
+specific hardware targets.
+
+> **At a glance:** ✅ `POST /api/quantize` is a real, tested FP32→INT8 pass.
+> 🔮 `POST /api/compile` still depends on a Cloudflare model ID (`@cf/onnx`)
+> that does not exist in the real catalog — see
+> [Status of the model-transformation step](#--status-of-the-model-transformation-step).
 
 ## Endpoints
 
@@ -195,6 +201,15 @@ Tests run the real Worker inside the `workerd` runtime via
 stubs — no Cloudflare account or network is required. The test-only
 `wrangler.test.toml` intentionally omits the `[ai]` binding so no remote Workers
 AI connection is opened during tests.
+
+## Related Repos
+
+This repo is part of the [SuperInstance](https://github.com/SuperInstance) edge fleet. Siblings with a genuine conceptual connection:
+
+- **[marine-gpu-edge](https://github.com/SuperInstance/marine-gpu-edge)** — GPU/CUDA computing at the edge; edge-compiler targets the same NVIDIA hardware class (T4, Jetson Nano).
+- **[open-mythos-edge](https://github.com/SuperInstance/open-mythos-edge)** — a real PyTorch transformer (GQA/RoPE, MoE, LoRA); the kind of model this worker quantizes to INT8 for edge deployment.
+- **[Edge-Native](https://github.com/SuperInstance/Edge-Native)** — edge-device runtime (ESP32 firmware VM + Jetson bytecode layer); represents the deployment targets edge-compiler compiles for.
+- **[edge-equipment-catalog](https://github.com/SuperInstance/edge-equipment-catalog)** — hardware compatibility profiles; conceptually complementary to edge-compiler's own hardware-target matrix (supported precisions, memory limits).
 
 ## License
 
