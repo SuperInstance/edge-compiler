@@ -1,0 +1,15 @@
+# Test-only wrangler config used by vitest (@cloudflare/vitest-pool-workers).
+# Deliberately omits the [ai] binding: the /api/quantize path (the only thing
+# under test) does not use env.AI, so we avoid a remote Workers AI connection
+# during local/CI test runs. KV/R2 are stubbed in-memory by vitest.config.mts.
+name = "edge-compiler-test"
+main = "src/worker.ts"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "COMPILER_CACHE"
+id = "test"
+
+[[r2_buckets]]
+binding = "MODEL_STORE"
+bucket_name = "model-store-test"
