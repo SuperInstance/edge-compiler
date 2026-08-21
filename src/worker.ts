@@ -1,3 +1,9 @@
+import {
+  quantizeFloat32ToInt8,
+  encodeQuantizedBlob,
+  sizeReductionFraction,
+} from "./quantize";
+
 export interface Env {
   COMPILER_CACHE: KVNamespace;
   MODEL_STORE: R2Bucket;
@@ -13,9 +19,27 @@ interface CompileRequest {
 }
 
 interface QuantizeRequest {
-  modelId: string;
+  /** R2 key of a pre-uploaded raw float32 buffer to quantize. */
+  modelId?: string;
   precision: 'int8' | 'int4';
+  /** Inline float values to quantize (alternative to modelId/data). */
+  values?: number[];
+  /** Base64 of a raw float32 byte buffer to quantize (alternative to modelId/values). */
+  data?: string;
+  /** Accepted for backward compatibility; ignored by the real int8 pass. */
   calibrationData?: string;
+}
+
+interface QuantizeResponse {
+  modelId?: string;
+  precision: 'int8' | 'int4';
+  method: string;
+  scale: number;
+  elementCount: number;
+  originalBytes: number;
+  quantizedBytes: number;
+  sizeReduction: string;
+  downloadUrl: string;
 }
 
 interface CompileResponse {
@@ -71,7 +95,18 @@ const CORS_HEADERS = {
   "Access-Control-Max-Age": "86400"
 };
 
-async function handleCompile(request: Request, env: Env): Promise<Response> {
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+  });
+}
+
+async function handleCompile(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   try {
     const data: CompileRequest = await request.json();
     
@@ -114,7 +149,12 @@ async function handleCompile(request: Request, env: Env): Promise<Response> {
       createdAt: Date.now()
     }), { expirationTtl: 3600 });
 
-    setTimeout(() => processCompilationJob(jobId, data, env), 100);
+    // Schedule the background job through the request's execution context so
+    // the Workers runtime keeps the isolate alive long enough for the KV
+    // status transitions (queued -> processing -> completed|failed) to actually
+    // run. A bare setTimeout() is NOT guaranteed to fire after the response is
+    // returned; ctx.waitUntil() is the correct primitive.
+    ctx.waitUntil(processCompilationJob(jobId, data, env));
 
     return new Response(JSON.stringify(response), {
       status: 202,
@@ -143,7 +183,7 @@ async function processCompilationJob(jobId: string, data: CompileRequest, env: E
       throw new Error("Model not found");
     }
 
-    const compiledModel = await compileModel(model, data);
+    const compiledModel = await compileModel(model, data, env);
     
     const outputKey = `compiled/${jobId}/${data.modelId}.${data.target}`;
     await env.MODEL_STORE.put(outputKey, compiledModel);
@@ -158,16 +198,17 @@ async function processCompilationJob(jobId: string, data: CompileRequest, env: E
     }), { expirationTtl: 86400 });
     
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     await env.COMPILER_CACHE.put(cacheKey, JSON.stringify({
       ...data,
       status: 'failed',
-      error: error.message,
+      error: errorMessage,
       failedAt: Date.now()
     }), { expirationTtl: 3600 });
   }
 }
 
-async function compileModel(model: R2Object, options: CompileRequest): Promise<ArrayBuffer> {
+async function compileModel(model: R2ObjectBody, options: CompileRequest, env: Env): Promise<ArrayBuffer> {
   const modelData = await model.arrayBuffer();
   
   const compilationOptions = {
@@ -185,57 +226,90 @@ async function compileModel(model: R2Object, options: CompileRequest): Promise<A
     options: compilationOptions
   });
 
-  return result.compiledModel;
+  const compiled = result as { compiledModel: ArrayBuffer };
+  return compiled.compiledModel;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToFloat32(bytes: Uint8Array): Float32Array {
+  if (bytes.byteLength % 4 !== 0) {
+    throw new Error(
+      `float32 buffer length (${bytes.byteLength}) is not a multiple of 4`,
+    );
+  }
+  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 }
 
 async function handleQuantize(request: Request, env: Env): Promise<Response> {
   try {
     const data: QuantizeRequest = await request.json();
-    
-    if (!data.modelId || !data.precision) {
-      return new Response(JSON.stringify({ error: "Missing required fields" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS }
-      });
+
+    if (!data.precision) {
+      return jsonError(400, "Missing required field: precision");
+    }
+    if (data.precision !== "int8" && data.precision !== "int4") {
+      return jsonError(400, `Unsupported precision: ${data.precision}`);
+    }
+    if (data.precision === "int4") {
+      return jsonError(
+        501,
+        "int4 quantization is not implemented (only int8 is real).",
+      );
     }
 
-    const model = await env.MODEL_STORE.get(data.modelId);
-    if (!model) {
-      return new Response(JSON.stringify({ error: "Model not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS }
-      });
+    let float32: Float32Array;
+    try {
+      if (data.values && data.values.length > 0) {
+        float32 = new Float32Array(data.values);
+      } else if (data.data) {
+        float32 = bytesToFloat32(base64ToBytes(data.data));
+      } else if (data.modelId) {
+        const obj = await env.MODEL_STORE.get(data.modelId);
+        if (!obj) return jsonError(404, "Model not found");
+        float32 = bytesToFloat32(new Uint8Array(await obj.arrayBuffer()));
+      } else {
+        return jsonError(
+          400,
+          "No input provided: supply one of 'values', 'data', or 'modelId'",
+        );
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return jsonError(400, `Invalid input buffer: ${msg}`);
     }
 
-    const quantizationOptions = {
-      precision: data.precision,
-      calibrationData: data.calibrationData,
-      symmetric: true,
-      perChannel: true
+    const result = quantizeFloat32ToInt8(float32);
+    const blob = encodeQuantizedBlob(result);
+
+    const quantizedKey = data.modelId
+      ? `quantized/${data.modelId}_int8`
+      : `quantized/buffer_int8_${crypto.randomUUID()}`;
+    await env.MODEL_STORE.put(quantizedKey, blob);
+
+    const response: QuantizeResponse = {
+      modelId: data.modelId,
+      precision: "int8",
+      method: "symmetric-per-tensor-int8",
+      scale: result.scale,
+      elementCount: float32.length,
+      originalBytes: result.originalBytes,
+      quantizedBytes: blob.byteLength,
+      sizeReduction: `${(sizeReductionFraction(result.originalBytes, blob.byteLength) * 100).toFixed(1)}%`,
+      downloadUrl: `/api/download/${quantizedKey}`,
     };
 
-    const modelData = await model.arrayBuffer();
-    const quantized = await env.AI.run("@cf/quantization", {
-      model: new Uint8Array(modelData),
-      options: quantizationOptions
-    });
-
-    const quantizedKey = `quantized/${data.modelId}_${data.precision}`;
-    await env.MODEL_STORE.put(quantizedKey, quantized.model);
-
-    return new Response(JSON.stringify({
-      modelId: data.modelId,
-      precision: data.precision,
-      sizeReduction: `${((1 - quantized.model.byteLength / modelData.byteLength) * 100).toFixed(1)}%`,
-      downloadUrl: `/api/download/${quantizedKey}`
-    }), {
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS }
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
     });
   } catch (error) {
-    return new Response(JSON.stringify({ error: "Quantization failed" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS }
-    });
+    const msg = error instanceof Error ? error.message : String(error);
+    return jsonError(500, `Quantization failed: ${msg}`);
   }
 }
 
@@ -295,7 +369,7 @@ export default {
     }
 
     if (path === "/api/compile" && request.method === "POST") {
-      return handleCompile(request, env);
+      return handleCompile(request, env, ctx);
     }
 
     if (path === "/api/quantize" && request.method === "POST") {

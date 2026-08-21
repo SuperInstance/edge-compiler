@@ -2,3 +2,17 @@ name = "edge-compiler"
 main = "src/worker.ts"
 compatibility_date = "2024-01-01"
 account_id = "049ff5e84ecf636b53b162cbb580aae6"
+
+# Replace these placeholder IDs with your own before deploying:
+#   npx wrangler kv namespace create COMPILER_CACHE
+#   npx wrangler r2 bucket create model-store
+[[kv_namespaces]]
+binding = "COMPILER_CACHE"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[[r2_buckets]]
+binding = "MODEL_STORE"
+bucket_name = "model-store"
+
+[ai]
+binding = "AI"
