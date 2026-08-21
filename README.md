@@ -1,6 +1,12 @@
 # edge-compiler
 
-Compile and optimize machine learning models for specific hardware targets using Cloudflare Workers Edge Compiler.
+A Cloudflare Worker for compiling and quantizing machine-learning models for
+specific hardware targets.
+
+> **At a glance:** ✅ `POST /api/quantize` is a real, tested FP32→INT8 pass.
+> 🔮 `POST /api/compile` still depends on a Cloudflare model ID (`@cf/onnx`)
+> that does not exist in the real catalog — see
+> [Status of the model-transformation step](#--status-of-the-model-transformation-step).
 
 ## Endpoints
 
@@ -158,10 +164,14 @@ symmetric linear quantization pass implemented directly in the Worker
   `[127,-127,64,-63,32,-32,0,16]`, scale `1/127`, payload 8 B vs 32 B (75%
   reduction), stored blob 16 B vs 32 B (50% reduction), plus dequantization
   round-trip and blob encode/decode validation.
-- **Integration tests** (`src/worker.test.ts`, 9 tests) running the real Worker
+- **Integration tests** (`src/worker.test.ts`, 14 tests) running the real Worker
   in the `workerd` runtime via `@cloudflare/vitest-pool-workers` with in-memory
   KV/R2 stubs, asserting the live HTTP response carries those exact numbers and
-  the downloaded blob decodes to the expected INT8 array.
+  the downloaded blob decodes to the expected INT8 array. They also cover the
+  `/api/compile` validation branches (missing fields, unsupported hardware,
+  unsupported precision) and verify the compile job's background task is
+  scheduled via `ctx.waitUntil` so its KV status actually transitions out of
+  `queued`.
 
 `int4` quantization is **not** implemented and is honestly rejected with `501`
 rather than faked.
@@ -187,7 +197,7 @@ npx wrangler deploy
 
 ```bash
 npm run typecheck   # tsc, strict
-npm test            # vitest: 19 tests (10 unit + 9 integration)
+npm test            # vitest: 24 tests (10 unit + 14 integration)
 ```
 
 Tests run the real Worker inside the `workerd` runtime via
@@ -195,6 +205,15 @@ Tests run the real Worker inside the `workerd` runtime via
 stubs — no Cloudflare account or network is required. The test-only
 `wrangler.test.toml` intentionally omits the `[ai]` binding so no remote Workers
 AI connection is opened during tests.
+
+## Related Repos
+
+This repo is part of the [SuperInstance](https://github.com/SuperInstance) edge fleet. Siblings with a genuine conceptual connection:
+
+- **[marine-gpu-edge](https://github.com/SuperInstance/marine-gpu-edge)** — GPU/CUDA computing at the edge; edge-compiler targets the same NVIDIA hardware class (T4, Jetson Nano).
+- **[open-mythos-edge](https://github.com/SuperInstance/open-mythos-edge)** — a real PyTorch transformer (GQA/RoPE, MoE, LoRA); the kind of model this worker quantizes to INT8 for edge deployment.
+- **[Edge-Native](https://github.com/SuperInstance/Edge-Native)** — edge-device runtime (ESP32 firmware VM + Jetson bytecode layer); represents the deployment targets edge-compiler compiles for.
+- **[edge-equipment-catalog](https://github.com/SuperInstance/edge-equipment-catalog)** — hardware compatibility profiles; conceptually complementary to edge-compiler's own hardware-target matrix (supported precisions, memory limits).
 
 ## License
 
